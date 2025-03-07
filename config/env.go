@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"log"
 	"os"
 
@@ -16,7 +15,6 @@ func LoadEnv() {
 }
 
 func GetEnv(key string) string {
-	fmt.Println(key)
 	value, exists := os.LookupEnv(key)
 	if !exists {
 		log.Fatalf("❌ Required environment variable %s is not set", key)
