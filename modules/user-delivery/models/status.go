@@ -1,12 +1,12 @@
 package models
 
 const (
-	StatusActive  = "active"
-	StatusInactive= "inactive"
+	StatusActive   = "active"
+	StatusInactive = "inactive"
 )
 
 func IsValidStatus(status string) bool {
-	switch (status) {
+	switch status {
 	case StatusActive, StatusInactive:
 		return true
 	}
