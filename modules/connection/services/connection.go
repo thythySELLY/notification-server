@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"notification-server/helpers"
 	"notification-server/modules/connection/domain"
 	dto "notification-server/modules/connection/dtos"
 	"notification-server/modules/connection/models"
@@ -32,20 +34,24 @@ func NewConnectionService(connectionRepo *connectionRepositories.ConnectionRepos
 }
 
 func (service *ConnectionService) CreateConnection(ctx context.Context, req dto.CreateConnection) (primitive.ObjectID, error) {
-	webviewExists, err := service.webviewRepo.IsWebviewExistsByID(ctx, req.WebviewServerId)
-	if err != nil {
-		return primitive.NilObjectID, err
-	}
-	if !webviewExists {
-		return primitive.NilObjectID, errors.New("webview server does not exist")
+	if req.WebviewServerId != "" {
+		webviewExists, err := service.webviewRepo.IsWebviewExistsByID(ctx, req.WebviewServerId)
+		if err != nil {
+			return primitive.NilObjectID, err
+		}
+		if !webviewExists {
+			return primitive.NilObjectID, errors.New("webview server does not exist")
+		}
 	}
 
-	userDeliveryExists, err := service.userDeliveryRepo.IsUserDeliveryExistsByID(ctx, req.UserDeliveryServerId)
-	if err != nil {
-		return primitive.NilObjectID, err
-	}
-	if !userDeliveryExists {
-		return primitive.NilObjectID, errors.New("user delivery server does not exist")
+	if req.UserDeliveryServerId != "" {
+		userDeliveryExists, err := service.userDeliveryRepo.IsUserDeliveryExistsByID(ctx, req.UserDeliveryServerId)
+		if err != nil {
+			return primitive.NilObjectID, err
+		}
+		if !userDeliveryExists {
+			return primitive.NilObjectID, errors.New("user delivery server does not exist")
+		}
 	}
 
 	exists, err := service.connectionRepo.IsHavingSameConnection(req.UserDeliveryServerId, req.WebviewServerId)
@@ -96,24 +102,34 @@ func generateRandomAPIKey() (string, error) {
 }
 
 func (service *ConnectionService) GetConnections(ctx context.Context, req dto.GetConnections) (domain.ConnectionResponse, error) {
-	if req.WebviewServerId == "" || req.UserDeliveryServerId == "" {
-		return domain.ConnectionResponse{}, errors.New("webviewId and userDeliveryId must not be empty")
+	cacheKey := fmt.Sprintf("connections:%s:%s:%s:%d:%s", req.UserDeliveryServerId, req.WebviewServerId, req.Status, req.Limit, req.PageToken)
+
+	cachedData, err := helpers.GetCache(cacheKey)
+	if err == nil {
+		var cachedResponse domain.ConnectionResponse
+		if jsonErr := json.Unmarshal([]byte(cachedData), &cachedResponse); jsonErr == nil {
+			return cachedResponse, nil
+		}
 	}
 
-	webviewExists, err := service.webviewRepo.IsWebviewExistsByID(ctx, req.WebviewServerId)
-	if err != nil {
-		return domain.ConnectionResponse{}, err
-	}
-	if !webviewExists {
-		return domain.ConnectionResponse{}, errors.New("webview server does not exist")
+	if req.WebviewServerId != "" {
+		webviewExists, err := service.webviewRepo.IsWebviewExistsByID(ctx, req.WebviewServerId)
+		if err != nil {
+			return domain.ConnectionResponse{}, err
+		}
+		if !webviewExists {
+			return domain.ConnectionResponse{}, errors.New("webview server does not exist")
+		}
 	}
 
-	userDeliveryExists, err := service.userDeliveryRepo.IsUserDeliveryExistsByID(ctx, req.UserDeliveryServerId)
-	if err != nil {
-		return domain.ConnectionResponse{}, err
-	}
-	if !userDeliveryExists {
-		return domain.ConnectionResponse{}, errors.New("user delivery server does not exist")
+	if req.UserDeliveryServerId != "" {
+		userDeliveryExists, err := service.userDeliveryRepo.IsUserDeliveryExistsByID(ctx, req.UserDeliveryServerId)
+		if err != nil {
+			return domain.ConnectionResponse{}, err
+		}
+		if !userDeliveryExists {
+			return domain.ConnectionResponse{}, errors.New("user delivery server does not exist")
+		}
 	}
 
 	connections, nextPageToken, err := service.connectionRepo.GetConnections(ctx, req.UserDeliveryServerId, req.WebviewServerId, req.Status, req.Limit, req.PageToken)
@@ -121,14 +137,19 @@ func (service *ConnectionService) GetConnections(ctx context.Context, req dto.Ge
 		return domain.ConnectionResponse{}, err
 	}
 
-	return domain.ConnectionResponse{
+	response := domain.ConnectionResponse{
 		Message: "success",
 		Code:    200,
 		Data: domain.GetUserDeliveryList{
 			List:          connections,
 			NextPageToken: nextPageToken,
 		},
-	}, nil
+	}
+
+	jsonData, _ := json.Marshal(response)
+	_ = helpers.SetCache(cacheKey, string(jsonData))
+
+	return response, nil
 }
 
 func (service *ConnectionService) UpdateWebHookUrl(ctx context.Context, dto dto.UpdateUserDelivery) error {
@@ -144,7 +165,7 @@ func (service *ConnectionService) UpdateWebHookUrl(ctx context.Context, dto dto.
 }
 
 func (s *ConnectionService) ChangeConnectionStatus(ctx context.Context, req dto.ChangeConnectionStatus) (domain.ConnectionResponse, error) {
-	connection, err := s.connectionRepo.GetConnectionByID(ctx, req.ID) 
+	connection, err := s.connectionRepo.GetConnectionByID(ctx, req.ID)
 	if err != nil {
 		return domain.ConnectionResponse{
 			Message: "Connection not found, no status change applied",
@@ -161,6 +182,40 @@ func (s *ConnectionService) ChangeConnectionStatus(ctx context.Context, req dto.
 		}, fmt.Errorf("connection with id '%s' already has the requested status '%s'", req.ID, req.Status)
 	}
 
+	if req.Status == "active" {
+		isWebviewActive, err := s.webviewRepo.IsWebviewActive(ctx, connection.WebviewServerId)
+		if err != nil {
+			return domain.ConnectionResponse{
+				Message: "Error checking webview server status",
+				Code:    500,
+				Data:    nil,
+			}, err
+		}
+		if !isWebviewActive {
+			return domain.ConnectionResponse{
+				Message: "Webview server is not active, cannot change status to active",
+				Code:    400,
+				Data:    nil,
+			}, fmt.Errorf("webview server with id '%s' is not active", connection.WebviewServerId)
+		}
+
+		isUserDeliveryActive, err := s.userDeliveryRepo.IsUserDeliveryActive(ctx, connection.UserDeliveryServerId)
+		if err != nil {
+			return domain.ConnectionResponse{
+				Message: "Error checking user delivery server status",
+				Code:    500,
+				Data:    nil,
+			}, err
+		}
+		if !isUserDeliveryActive {
+			return domain.ConnectionResponse{
+				Message: "User delivery server is not active, cannot change status to active",
+				Code:    400,
+				Data:    nil,
+			}, fmt.Errorf("user delivery server with id '%s' is not active", connection.UserDeliveryServerId)
+		}
+	}
+
 	objectID, updateErr := s.connectionRepo.ChangeConnectionStatus(ctx, req.ID, req.Status)
 	if updateErr != nil {
 		return domain.ConnectionResponse{
@@ -175,4 +230,16 @@ func (s *ConnectionService) ChangeConnectionStatus(ctx context.Context, req dto.
 		Code:    200,
 		Data:    objectID,
 	}, nil
+}
+
+func (service *ConnectionService) DeleteConnection(ctx context.Context, dto dto.DeleteConnection) error {
+	exists, err := service.connectionRepo.IsHavingConnectionById(ctx, dto.ID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("connection with ID %s does not exist", dto.ID)
+	}
+
+	return service.connectionRepo.DeleteConnection(ctx, dto.ID)
 }

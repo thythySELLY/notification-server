@@ -2,6 +2,8 @@ package repositories
 
 import (
 	"context"
+	"fmt"
+	"notification-server/helpers"
 	"notification-server/modules/connection/models"
 	"time"
 
@@ -62,21 +64,32 @@ func (repo *ConnectionRepository) GetConnections(ctx context.Context, userDelive
 	filter := bson.M{}
 
 	if userDeliveryId != "" {
-		filter["userDeliveryServerId"] = userDeliveryId
+		objectID, err := helpers.StringToObjectID(userDeliveryId)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid userDeliveryId: %s", userDeliveryId)
+		}
+		filter["userDeliveryServerId"] = objectID
 	}
+
 	if webviewID != "" {
-		filter["webviewServerId"] = webviewID
+		objectID, err := helpers.StringToObjectID(webviewID)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid webviewID: %s", webviewID)
+		}
+		filter["webviewServerId"] = objectID
 	}
+
 	if status != "" {
 		filter["status"] = status
 	}
-	if nextPageToken != "" {
-		tokenID, err := primitive.ObjectIDFromHex(nextPageToken)
-		if err == nil {
-			filter["_id"] = bson.M{"$gt": tokenID}
-		}
-	}
 
+	if nextPageToken != "" {
+		tokenID, err := helpers.StringToObjectID(nextPageToken)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid nextPageToken: %s", nextPageToken)
+		}
+		filter["_id"] = bson.M{"$gt": tokenID}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -227,4 +240,15 @@ func (repo *ConnectionRepository) GetConnectionByWebviewId(ctx context.Context, 
 	}
 
 	return connections, nil
+}
+
+func (repo *ConnectionRepository) DeleteConnection(ctx context.Context, id string) error {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return err
+	}
+
+	filter := bson.M{"_id": objectID}
+	_, err = repo.collection.DeleteOne(ctx, filter)
+	return err
 }

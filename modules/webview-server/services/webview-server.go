@@ -2,13 +2,14 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	connectionRepositories "notification-server/modules/connection/repositories"
-	userDeliveryRepositories "notification-server/modules/user-delivery/repositories"
 	"notification-server/modules/webview-server/domain"
 	dto "notification-server/modules/webview-server/dtos"
 	"notification-server/modules/webview-server/models"
 	"notification-server/modules/webview-server/repositories"
+	"notification-server/helpers"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -16,16 +17,25 @@ import (
 )
 
 type WebViewService struct {
-	repo             *repositories.WebViewRepository
-	connectionRepo   *connectionRepositories.ConnectionRepository
-	userDeliveryRepo *userDeliveryRepositories.UserDeliveryRepository
+	repo           *repositories.WebViewRepository
+	connectionRepo *connectionRepositories.ConnectionRepository
 }
 
-func NewWebviewService(repo *repositories.WebViewRepository) *WebViewService {
-	return &WebViewService{repo: repo}
+func NewWebviewService(repo *repositories.WebViewRepository, connectionRepo *connectionRepositories.ConnectionRepository) *WebViewService {
+	return &WebViewService{repo: repo, connectionRepo: connectionRepo}
 }
 
 func (s *WebViewService) GetWebviewListService(ctx context.Context, keyword string, status string, limit int, nextPageToken string) (domain.WebViewResponse, error) {
+	cacheKey := fmt.Sprintf("webview_list:%s:%s:%d:%s", keyword, status, limit, nextPageToken)
+
+	cachedData, err := helpers.GetCache(cacheKey)
+	if err == nil {
+		var cachedResponse domain.WebViewResponse
+		if jsonErr := json.Unmarshal([]byte(cachedData), &cachedResponse); jsonErr == nil {
+			return cachedResponse, nil
+		}
+	}
+
 	webviews, lastID, err := s.repo.GetWebviewList(ctx, keyword, status, limit, nextPageToken)
 	if err != nil {
 		return domain.WebViewResponse{}, err
@@ -36,14 +46,19 @@ func (s *WebViewService) GetWebviewListService(ctx context.Context, keyword stri
 		nextPageToken = lastID
 	}
 
-	return domain.WebViewResponse{
+	response := domain.WebViewResponse{
 		Message: "success",
 		Code:    200,
 		Data: domain.GetWebViewList{
 			List:          webviews,
 			NextPageToken: nextPageToken,
 		},
-	}, nil
+	}
+
+	jsonData, _ := json.Marshal(response)
+	_ = helpers.SetCache(cacheKey, string(jsonData))
+
+	return response, nil
 }
 
 func (s *WebViewService) CreateWebviewService(ctx context.Context, req dto.CreateWebviewServer) (domain.WebViewResponse, error) {
@@ -173,7 +188,7 @@ func (s *WebViewService) ChangeWebviewStatus(ctx context.Context, req dto.Change
 			return nil, updateErr
 		}
 
-		connections, connErr := s.connectionRepo.GetConnectionByWebviewId(sessCtx, req.ID) 
+		connections, connErr := s.connectionRepo.GetConnectionByWebviewId(sessCtx, req.ID)
 		if connErr != nil {
 			return nil, connErr
 		}
@@ -183,17 +198,6 @@ func (s *WebViewService) ChangeWebviewStatus(ctx context.Context, req dto.Change
 				_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "inactive")
 				if err != nil {
 					return nil, err
-				}
-			} else if conn.Status == "inactive" && req.Status == "active" {
-				isActive, err := s.userDeliveryRepo.IsUserDeliveryActive(sessCtx, conn.UserDeliveryServerId) // Assuming this method exists
-				if err != nil {
-					return nil, err
-				}
-				if isActive {
-					_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "active")
-					if err != nil {
-						return nil, err
-					}
 				}
 			}
 		}
@@ -217,6 +221,7 @@ func (s *WebViewService) ChangeWebviewStatus(ctx context.Context, req dto.Change
 }
 
 func (s *WebViewService) DeleteWebviewService(ctx context.Context, req dto.DeleteWebviewServer) (domain.WebViewResponse, error) {
+
 	exists, err := s.repo.IsWebviewExistsByID(ctx, req.ID)
 	if err != nil {
 		return domain.WebViewResponse{
@@ -233,18 +238,47 @@ func (s *WebViewService) DeleteWebviewService(ctx context.Context, req dto.Delet
 		}, fmt.Errorf("webview with id '%s' does not exist", req.ID)
 	}
 
-	deletedID, deleteErr := s.repo.DeleteWebview(ctx, req.ID)
-	if deleteErr != nil {
+	session, err := s.repo.StartSession(ctx)
+	if err != nil {
 		return domain.WebViewResponse{
-			Message: "failed to delete WebView",
+			Message: "Failed to start transaction",
 			Code:    500,
 			Data:    nil,
-		}, deleteErr
+		}, err
+	}
+	defer session.EndSession(ctx)
+
+	result, err := session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		connections, connErr := s.connectionRepo.GetConnectionByWebviewId(sessCtx, req.ID)
+		if connErr != nil {
+			return nil, connErr
+		}
+
+		for _, conn := range connections {
+			if err := s.connectionRepo.DeleteConnection(sessCtx, conn.ID); err != nil {
+				return nil, err
+			}
+		}
+
+		deletedID, deleteErr := s.repo.DeleteWebview(sessCtx, req.ID)
+		if deleteErr != nil {
+			return nil, deleteErr
+		}
+
+		return deletedID, nil
+	})
+
+	if err != nil {
+		return domain.WebViewResponse{
+			Message: "Failed to delete WebView and associated connections",
+			Code:    500,
+			Data:    nil,
+		}, err
 	}
 
 	return domain.WebViewResponse{
 		Message: "success",
 		Code:    200,
-		Data:    deletedID,
+		Data:    result,
 	}, nil
 }

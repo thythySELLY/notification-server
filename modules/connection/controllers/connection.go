@@ -53,7 +53,7 @@ func (c *ConnectionController) GetConnections(ctx echo.Context) error {
 	}
 
 	if query.Status != "active" && query.Status != "inactive" {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "status must be 'active' or 'inactive'"})
+		query.Status = "inactive"
 	}
 
 	response, err := c.service.GetConnections(ctx.Request().Context(), query)
@@ -68,6 +68,7 @@ func (c *ConnectionController) UpdateWebHookUrl(ctx echo.Context) error {
 	id := ctx.Param("id")
 
 	var dto dto.UpdateUserDelivery
+	dto.ID = id
 	if err := ctx.Bind(&dto); err != nil {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request payload"})
 	}
@@ -84,7 +85,6 @@ func (c *ConnectionController) UpdateWebHookUrl(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": err.Error()})
 	}
 
-	// Respond with success
 	return ctx.JSON(http.StatusOK, map[string]string{"message": "Webhook URL updated successfully"})
 }
 
@@ -103,7 +103,7 @@ func (c *ConnectionController) ChangeConnectionStatus(ctx echo.Context) error {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "id and status are required"})
 	}
 
-	if !models.IsValidStatus(status) { 
+	if !models.IsValidStatus(status) {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid status type"})
 	}
 
@@ -113,4 +113,22 @@ func (c *ConnectionController) ChangeConnectionStatus(ctx echo.Context) error {
 	}
 
 	return ctx.JSON(http.StatusOK, response)
+}
+
+func (c *ConnectionController) DeleteConnection(ctx echo.Context) error {
+	id := ctx.Param("id")
+
+	var req dto.DeleteConnection
+	req.ID = strings.TrimSpace(id)
+
+	if id == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "ID cannot be empty"})
+	}
+
+	err := c.service.DeleteConnection(ctx.Request().Context(), req)
+	if err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	return ctx.JSON(http.StatusOK, map[string]string{"message": "Connection deleted successfully"})
 }

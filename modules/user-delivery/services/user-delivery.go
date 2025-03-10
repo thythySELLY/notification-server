@@ -2,7 +2,9 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"notification-server/helpers"
 	connectionRepositories "notification-server/modules/connection/repositories"
 	"notification-server/modules/user-delivery/domain"
 	dto "notification-server/modules/user-delivery/dtos"
@@ -30,6 +32,16 @@ func NewUserDeliveryService(repo *repositories.UserDeliveryRepository, connectio
 }
 
 func (s *UserDeliveryService) GetUserDeliveryList(ctx context.Context, keyword string, status string, limit int, nextPageToken string) (domain.UserDeliveryResponse, error) {
+	cacheKey := fmt.Sprintf("user_delivery_list:%s:%s:%d:%s", keyword, status, limit, nextPageToken)
+
+	cachedData, err := helpers.GetCache(cacheKey)
+	if err == nil {
+		var cachedResponse domain.UserDeliveryResponse
+		if jsonErr := json.Unmarshal([]byte(cachedData), &cachedResponse); jsonErr == nil {
+			return cachedResponse, nil
+		}
+	}
+
 	userDeliveries, lastID, err := s.repo.GetUserDeliveryList(ctx, keyword, status, limit, nextPageToken)
 	if err != nil {
 		return domain.UserDeliveryResponse{}, err
@@ -40,14 +52,19 @@ func (s *UserDeliveryService) GetUserDeliveryList(ctx context.Context, keyword s
 		nextPageToken = lastID
 	}
 
-	return domain.UserDeliveryResponse{
+	response := domain.UserDeliveryResponse{
 		Message: "success",
 		Code:    200,
 		Data: domain.GetUserDeliveryList{
 			List:          userDeliveries,
 			NextPageToken: nextPageToken,
 		},
-	}, nil
+	}
+
+	jsonData, _ := json.Marshal(response)
+	_ = helpers.SetCache(cacheKey, string(jsonData))
+
+	return response, nil
 }
 
 func (s *UserDeliveryService) CreateUserDelivery(ctx context.Context, req dto.CreateUserDelivery) (domain.UserDeliveryResponse, error) {
@@ -140,17 +157,6 @@ func (s *UserDeliveryService) ChangeUserDeliveryStatus(ctx context.Context, req 
 				if err != nil {
 					return nil, err
 				}
-			} else {
-				isActive, err := s.webviewRepo.IsWebviewActive(sessCtx, conn.WebviewServerId)
-				if err != nil {
-					return nil, err
-				}
-				if isActive {
-					_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "active")
-					if err != nil {
-						return nil, err
-					}
-				}
 			}
 		}
 
@@ -236,18 +242,47 @@ func (s *UserDeliveryService) DeleteUserDeliveryService(ctx context.Context, req
 		}, fmt.Errorf("user delivery with id '%s' does not exist", req.ID)
 	}
 
-	deletedID, deleteErr := s.repo.DeleteUserDelivery(ctx, req.ID)
-	if deleteErr != nil {
+	session, err := s.repo.StartSession(ctx)
+	if err != nil {
 		return domain.UserDeliveryResponse{
-			Message: "failed to delete User Delivery",
+			Message: "Failed to start transaction",
 			Code:    500,
 			Data:    nil,
-		}, deleteErr
+		}, err
+	}
+	defer session.EndSession(ctx)
+
+	result, err := session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		connections, connErr := s.connectionRepo.GetConnectionByUserDeliveryId(sessCtx, req.ID)
+		if connErr != nil {
+			return nil, connErr
+		}
+
+		for _, conn := range connections {
+			if err := s.connectionRepo.DeleteConnection(sessCtx, conn.ID); err != nil {
+				return nil, err
+			}
+		}
+
+		deletedID, deleteErr := s.repo.DeleteUserDelivery(sessCtx, req.ID)
+		if deleteErr != nil {
+			return nil, deleteErr
+		}
+
+		return deletedID, nil
+	})
+
+	if err != nil {
+		return domain.UserDeliveryResponse{
+			Message: "Failed to delete User Delivery and associated connections",
+			Code:    500,
+			Data:    nil,
+		}, err
 	}
 
 	return domain.UserDeliveryResponse{
 		Message: "success",
 		Code:    200,
-		Data:    deletedID,
+		Data:    result,
 	}, nil
 }

@@ -14,35 +14,19 @@ import (
 	webviewRepositories "notification-server/modules/webview-server/repositories"
 	webviewServices "notification-server/modules/webview-server/services"
 
-	"context"
-	"log"
-
 	"github.com/labstack/echo/v4"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func InitializeRouter() *echo.Echo {
 	e := echo.New()
 
-	clientOptions := options.Client().ApplyURI(config.MongoDBConfig.URI)
+	config.InitMongoDB()
 
-	client, err := mongo.Connect(context.TODO(), clientOptions)
-	if err != nil {
-		log.Fatal("Failed to connect to MongoDB:", err)
-	}
+	webviewRepo := webviewRepositories.NewWebviewRepository(config.MongoDBClient.Database(config.MongoDBConfig.Database), config.MongoDBClient)
+	userDeliveryRepo := userDeliveryRepositories.NewUserDeliveryRepository(config.MongoDBClient.Database(config.MongoDBConfig.Database), config.MongoDBClient)
+	connectionRepo := connectionRepositories.NewConnectionRepository(config.MongoDBClient.Database(config.MongoDBConfig.Database))
 
-	defer func() {
-		if err := client.Disconnect(context.TODO()); err != nil {
-			log.Fatal("Failed to disconnect from MongoDB:", err)
-		}
-	}()
-
-	webviewRepo := webviewRepositories.NewWebviewRepository(client.Database(config.MongoDBConfig.Database), client)
-	userDeliveryRepo := userDeliveryRepositories.NewUserDeliveryRepository(client.Database(config.MongoDBConfig.Database), client)
-	connectionRepo := connectionRepositories.NewConnectionRepository(client.Database(config.MongoDBConfig.Database))
-
-	webViewService := webviewServices.NewWebviewService(webviewRepo)
+	webViewService := webviewServices.NewWebviewService(webviewRepo, connectionRepo)
 	userDeliveryService := userDeliveryServices.NewUserDeliveryService(userDeliveryRepo, connectionRepo, webviewRepo)
 	connectionService := connectionServices.NewConnectionService(connectionRepo, userDeliveryRepo, webviewRepo)
 
@@ -72,6 +56,7 @@ func InitializeRouter() *echo.Echo {
 	e.GET("/connections", connectionController.GetConnections)
 	e.PATCH("/connection/:id/webhook", connectionController.UpdateWebHookUrl)
 	e.PATCH("/connection/:id/status", connectionController.ChangeConnectionStatus)
+	e.DELETE("/connection/:id", connectionController.DeleteConnection)
 
 	return e
 }
