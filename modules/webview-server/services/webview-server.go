@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	connectionRepositories "notification-server/modules/connection/repositories"
+	userDeliveryRepositories "notification-server/modules/user-delivery/repositories"
 	"notification-server/modules/webview-server/domain"
 	dto "notification-server/modules/webview-server/dtos"
 	"notification-server/modules/webview-server/models"
@@ -10,10 +12,13 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type WebViewService struct {
-	repo *repositories.WebViewRepository
+	repo             *repositories.WebViewRepository
+	connectionRepo   *connectionRepositories.ConnectionRepository
+	userDeliveryRepo *userDeliveryRepositories.UserDeliveryRepository
 }
 
 func NewWebviewService(repo *repositories.WebViewRepository) *WebViewService {
@@ -135,7 +140,6 @@ func (s *WebViewService) UpdateWebviewService(ctx context.Context, req dto.Updat
 }
 
 func (s *WebViewService) ChangeWebviewStatus(ctx context.Context, req dto.ChangeWebviewServerStatus) (domain.WebViewResponse, error) {
-
 	webview, err := s.repo.GetWebviewByID(ctx, req.ID)
 	if err != nil {
 		return domain.WebViewResponse{
@@ -153,19 +157,62 @@ func (s *WebViewService) ChangeWebviewStatus(ctx context.Context, req dto.Change
 		}, fmt.Errorf("webview with id '%s' already has the requested status '%s'", req.ID, req.Status)
 	}
 
-	objectID, updateErr := s.repo.ChangeWebviewStatus(ctx, req.ID, req.Status)
-	if updateErr != nil {
+	session, err := s.repo.StartSession(ctx)
+	if err != nil {
 		return domain.WebViewResponse{
-			Message: "failed to update WebView status",
+			Message: "Failed to start transaction",
 			Code:    500,
 			Data:    nil,
-		}, updateErr
+		}, err
+	}
+	defer session.EndSession(ctx)
+
+	result, err := session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		objectID, updateErr := s.repo.ChangeWebviewStatus(sessCtx, req.ID, req.Status)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+
+		connections, connErr := s.connectionRepo.GetConnectionByWebviewId(sessCtx, req.ID) 
+		if connErr != nil {
+			return nil, connErr
+		}
+
+		for _, conn := range connections {
+			if conn.Status == "active" && req.Status == "inactive" {
+				_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "inactive")
+				if err != nil {
+					return nil, err
+				}
+			} else if conn.Status == "inactive" && req.Status == "active" {
+				isActive, err := s.userDeliveryRepo.IsUserDeliveryActive(sessCtx, conn.UserDeliveryServerId) // Assuming this method exists
+				if err != nil {
+					return nil, err
+				}
+				if isActive {
+					_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "active")
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+
+		return objectID, nil
+	})
+
+	if err != nil {
+		return domain.WebViewResponse{
+			Message: "Failed to update WebView and associated connections",
+			Code:    500,
+			Data:    nil,
+		}, err
 	}
 
 	return domain.WebViewResponse{
 		Message: "success",
 		Code:    200,
-		Data:    objectID,
+		Data:    result,
 	}, nil
 }
 

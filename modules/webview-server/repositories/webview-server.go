@@ -13,13 +13,19 @@ import (
 )
 
 type WebViewRepository struct {
-	list *mongo.Collection
+	list   *mongo.Collection
+	client *mongo.Client
 }
 
-func NewWebviewRepository(db *mongo.Database) *WebViewRepository {
+func NewWebviewRepository(db *mongo.Database, client *mongo.Client) *WebViewRepository {
 	return &WebViewRepository{
-		list: db.Collection("webviews"),
+		list:   db.Collection("webviews"),
+		client: client,
 	}
+}
+
+func (r *WebViewRepository) StartSession(ctx context.Context) (mongo.Session, error) {
+	return r.client.StartSession()
 }
 
 func (r *WebViewRepository) GetWebviewList(ctx context.Context, keyword string, status string, limit int, nextPageToken string) ([]models.WebViewServer, string, error) {
@@ -195,4 +201,19 @@ func (r *WebViewRepository) DeleteWebview(ctx context.Context, id string) (strin
 	}
 
 	return id, nil
+}
+
+func (r *WebViewRepository) IsWebviewActive(ctx context.Context, id string) (bool, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return false, err
+	}
+
+	var webview models.WebViewServer
+	err = r.list.FindOne(ctx, bson.M{"_id": objectID}).Decode(&webview)
+	if err != nil {
+		return false, err
+	}
+
+	return webview.Status == string(models.StatusActive), nil
 }

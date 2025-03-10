@@ -13,13 +13,19 @@ import (
 )
 
 type UserDeliveryRepository struct {
-	list *mongo.Collection
+	list   *mongo.Collection
+	client *mongo.Client
 }
 
-func NewUserDeliveryRepository(db *mongo.Database) *UserDeliveryRepository {
+func NewUserDeliveryRepository(db *mongo.Database, client *mongo.Client) *UserDeliveryRepository {
 	return &UserDeliveryRepository{
-		list: db.Collection("user-deliveries"),
+		list:   db.Collection("user-deliveries"),
+		client: client,
 	}
+}
+
+func (r *UserDeliveryRepository) StartSession(ctx context.Context) (mongo.Session, error) {
+	return r.client.StartSession()
 }
 
 func (r *UserDeliveryRepository) GetUserDeliveryList(ctx context.Context, keyword string, status string, limit int, nextPageToken string) ([]models.UserDelivery, string, error) {
@@ -195,4 +201,19 @@ func (r *UserDeliveryRepository) DeleteUserDelivery(ctx context.Context, id stri
 	}
 
 	return id, nil
+}
+
+func (r *UserDeliveryRepository) IsUserDeliveryActive(ctx context.Context, id string) (bool, error) {
+	objectID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return false, err
+	}
+
+	var userDelivery models.UserDelivery
+	err = r.list.FindOne(ctx, bson.M{"_id": objectID}).Decode(&userDelivery)
+	if err != nil {
+		return false, err
+	}
+
+	return userDelivery.Status == string(models.StatusActive), nil // Assuming StatusActive is defined in models
 }

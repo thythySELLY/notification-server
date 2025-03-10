@@ -3,21 +3,30 @@ package services
 import (
 	"context"
 	"fmt"
+	connectionRepositories "notification-server/modules/connection/repositories"
 	"notification-server/modules/user-delivery/domain"
 	dto "notification-server/modules/user-delivery/dtos"
 	"notification-server/modules/user-delivery/models"
 	"notification-server/modules/user-delivery/repositories"
+	webviewRepositories "notification-server/modules/webview-server/repositories"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type UserDeliveryService struct {
-	repo *repositories.UserDeliveryRepository
+	repo           *repositories.UserDeliveryRepository
+	connectionRepo *connectionRepositories.ConnectionRepository
+	webviewRepo    *webviewRepositories.WebViewRepository
 }
 
-func NewUserDeliveryService(repo *repositories.UserDeliveryRepository) *UserDeliveryService {
-	return &UserDeliveryService{repo: repo}
+func NewUserDeliveryService(repo *repositories.UserDeliveryRepository, connectionRepo *connectionRepositories.ConnectionRepository, webviewRepo *webviewRepositories.WebViewRepository) *UserDeliveryService {
+	return &UserDeliveryService{
+		repo:           repo,
+		connectionRepo: connectionRepo,
+		webviewRepo:    webviewRepo,
+	}
 }
 
 func (s *UserDeliveryService) GetUserDeliveryList(ctx context.Context, keyword string, status string, limit int, nextPageToken string) (domain.UserDeliveryResponse, error) {
@@ -79,11 +88,87 @@ func (s *UserDeliveryService) CreateUserDelivery(ctx context.Context, req dto.Cr
 	}
 
 	responseData := domain.CreateUserDelivery{ID: userDelivery.ID}
-
 	return domain.UserDeliveryResponse{
 		Message: "success",
 		Code:    200,
 		Data:    responseData,
+	}, nil
+}
+
+func (s *UserDeliveryService) ChangeUserDeliveryStatus(ctx context.Context, req dto.ChangeUserDeliveryStatus) (domain.UserDeliveryResponse, error) {
+	userDelivery, err := s.repo.GetUserDeliveryByID(ctx, req.ID)
+	if err != nil {
+		return domain.UserDeliveryResponse{
+			Message: "User Delivery not found, no status change applied",
+			Code:    500,
+			Data:    nil,
+		}, err
+	}
+
+	if userDelivery.Status == req.Status {
+		return domain.UserDeliveryResponse{
+			Message: "User Delivery status is already the same as the requested status",
+			Code:    400,
+			Data:    nil,
+		}, fmt.Errorf("user delivery with id '%s' already has the requested status '%s'", req.ID, req.Status)
+	}
+
+	session, err := s.repo.StartSession(ctx)
+	if err != nil {
+		return domain.UserDeliveryResponse{
+			Message: "Failed to start transaction",
+			Code:    500,
+			Data:    nil,
+		}, err
+	}
+	defer session.EndSession(ctx)
+
+	result, err := session.WithTransaction(ctx, func(sessCtx mongo.SessionContext) (interface{}, error) {
+		objectID, updateErr := s.repo.ChangeUserDeliveryStatus(sessCtx, req.ID, req.Status)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+
+		connections, connErr := s.connectionRepo.GetConnectionByUserDeliveryId(sessCtx, req.ID)
+		if connErr != nil {
+			return nil, connErr
+		}
+
+		for _, conn := range connections {
+			if conn.Status == "active" {
+				_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "inactive")
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				isActive, err := s.webviewRepo.IsWebviewActive(sessCtx, conn.WebviewServerId)
+				if err != nil {
+					return nil, err
+				}
+				if isActive {
+					_, err := s.connectionRepo.ChangeConnectionStatus(sessCtx, conn.ID, "active")
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+
+		return objectID, nil
+	})
+
+	if err != nil {
+		return domain.UserDeliveryResponse{
+			Message: "Failed to update User Delivery and associated connections",
+			Code:    500,
+			Data:    nil,
+		}, err
+	}
+
+	return domain.UserDeliveryResponse{
+		Message: "success",
+		Code:    200,
+		Data:    result,
 	}, nil
 }
 
@@ -131,41 +216,6 @@ func (s *UserDeliveryService) UpdateUserDeliveryService(ctx context.Context, req
 		Message: "success",
 		Code:    200,
 		Data:    updateID,
-	}, nil
-}
-
-func (s *UserDeliveryService) ChangeUserDeliveryStatus(ctx context.Context, req dto.ChangeUserDeliveryStatus) (domain.UserDeliveryResponse, error) {
-
-	userDelivery, err := s.repo.GetUserDeliveryByID(ctx, req.ID)
-	if err != nil {
-		return domain.UserDeliveryResponse{
-			Message: "User Delivery not found, no status change applied",
-			Code:    500,
-			Data:    nil,
-		}, err
-	}
-
-	if userDelivery.Status == req.Status {
-		return domain.UserDeliveryResponse{
-			Message: "User Delivery status is already the same as the requested status",
-			Code:    400,
-			Data:    nil,
-		}, fmt.Errorf("user delivery with id '%s' already has the requested status '%s'", req.ID, req.Status)
-	}
-
-	objectID, updateErr := s.repo.ChangeUserDeliveryStatus(ctx, req.ID, req.Status)
-	if updateErr != nil {
-		return domain.UserDeliveryResponse{
-			Message: "failed to update User Delivery status",
-			Code:    500,
-			Data:    nil,
-		}, updateErr
-	}
-
-	return domain.UserDeliveryResponse{
-		Message: "success",
-		Code:    200,
-		Data:    objectID,
 	}, nil
 }
 
